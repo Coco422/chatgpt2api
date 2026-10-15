@@ -94,6 +94,11 @@ FINGERPRINT_FULL_VERSION_LIST = (
 CLIENT_CREATED_ROOT = "client-created-root"
 IMAGE_CREATION_MENTION = "@创建图像"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+CODEX_IMAGE_MODEL_25 = "codex-gpt-image-2.5"
+CODEX_IMAGE_MODEL_25_TOOL_NAMES = {"gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+CODEX_IMAGE_QUALITY_TIERS = {"auto", "low", "medium", "high"}
+CODEX_IMAGE_25_QUALITY_TIERS = CODEX_IMAGE_QUALITY_TIERS | {"xhigh", "max"}
+# 取自 PR #419：Codex responses 的上游模型名，旧值 gpt-5.5 已失效
 CODEX_RESPONSES_MODEL = "gpt-6.1-sol"
 SEARCH_MODEL = "gpt-5-5"
 SEARCH_TIMEOUT_SECS = 300.0
@@ -154,6 +159,23 @@ def _is_content_policy_error(error_msg: str) -> bool:
         return False
     msg_lower = error_msg.lower()
     return any(keyword in msg_lower for keyword in _CONTENT_POLICY_KEYWORDS)
+
+
+def normalize_codex_image_quality(image_model: str, quality: str) -> str:
+    """按 Codex image_generation 工具模型规范化质量档。
+
+    - 2.5 系列工具模型（flare / sunburst）支持 auto/low/medium/high/xhigh/max。
+    - 其余工具模型（如 gpt-image-2）只支持 auto/low/medium/high：
+      xhigh/max 收敛为 high，未知档位保持原值透传（不改变既有行为）。
+    """
+    value = str(quality or "auto").strip().lower() or "auto"
+    allowed = CODEX_IMAGE_25_QUALITY_TIERS if image_model in CODEX_IMAGE_MODEL_25_TOOL_NAMES else CODEX_IMAGE_QUALITY_TIERS
+    if value in allowed:
+        return value
+    if value not in CODEX_IMAGE_25_QUALITY_TIERS:
+        return value
+    # xhigh / max 仅在 2.5 系列有效
+    return "high"
 
 
 @dataclass
@@ -637,10 +659,18 @@ class OpenAIBackendAPI:
         两个口径并不矛盾：默认/通用模型走 auto，只有显式 2.5 slug 才透传。
         """
         _, base_model = split_image_model(model)
-        if base_model == CODEX_IMAGE_MODEL:
+        # Codex 链路（2 系列 + 2.5 系列）直接用 image_generation 工具模型名
+        if base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25}:
             return base_model, ""
+        # 显式 Image 2.5 slug：透传真实上游模型名（#420）；
+        # 允许用 default_upstream_model_name_25 覆盖（#406）
         if base_model in WEB_IMAGE_MODELS - {"gpt-image-2"}:
-            return base_model, self._normalize_thinking_effort(config.default_thinking_effort)
+            upstream_model = config.default_upstream_model_name_25 or base_model
+            model_name, separator, suffix = upstream_model.rpartition("-")
+            if separator and suffix.lower() in {"standard", "extended", "max"}:
+                return model_name, suffix.lower()
+            return upstream_model, self._normalize_thinking_effort(config.default_thinking_effort)
+        # 默认/通用模型沿用 2026-10 抓包的 model=auto
         return "auto", ""
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
@@ -850,6 +880,7 @@ class OpenAIBackendAPI:
             images: list[str] | None = None,
             size: str | None = None,
             quality: str = "auto",
+            image_model: str = "gpt-image-2",
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex image endpoints")
@@ -862,10 +893,10 @@ class OpenAIBackendAPI:
             "input": self._codex_image_input(prompt, images or []),
             "tools": [{
                 "type": "image_generation",
-                "model": "gpt-image-2",
+                "model": str(image_model or "gpt-image-2"),
                 "action": "edit" if images else "generate",
                 "size": str(size or "1024x1024"),
-                "quality": str(quality or "auto"),
+                "quality": normalize_codex_image_quality(str(image_model or "gpt-image-2"), quality),
                 "output_format": "png",
             }],
             "tool_choice": {"type": "image_generation"},

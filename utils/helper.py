@@ -14,15 +14,20 @@ from fastapi import HTTPException
 from services.proxy_service import proxy_settings
 from utils.log import logger
 
+# 网页链路：显式 slug 用真实上游模型名（PR #420），gpt-image-2.5 是 flare 的别名
 WEB_IMAGE_MODELS = {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
 IMAGE_MODEL_ALIASES = {"gpt-image-2.5": "gpt-image-2.5-flare"}
-BASE_IMAGE_MODELS = WEB_IMAGE_MODELS | {"codex-gpt-image-2"}
 IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
+# Codex 链路：2 系列 + 2.5 系列（PR #406）
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+CODEX_IMAGE_MODEL_25 = "codex-gpt-image-2.5"
+CODEX_IMAGE_BASE_MODELS = {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25}
 PREFIXED_CODEX_IMAGE_MODELS = {
-    f"{plan_type}-{CODEX_IMAGE_MODEL}"
+    f"{plan_type}-{codex_model}"
     for plan_type in IMAGE_MODEL_PLAN_TYPES
+    for codex_model in CODEX_IMAGE_BASE_MODELS
 }
+BASE_IMAGE_MODELS = WEB_IMAGE_MODELS | CODEX_IMAGE_BASE_MODELS
 IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS | set(IMAGE_MODEL_ALIASES)
 PUBLIC_IMAGE_MODELS = IMAGE_MODELS
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
@@ -119,7 +124,7 @@ def split_image_model(model: object) -> tuple[str | None, str | None]:
         prefix = f"{plan_type}-"
         if normalized.startswith(prefix):
             base_model = normalized[len(prefix):]
-            if base_model == CODEX_IMAGE_MODEL:
+            if base_model in CODEX_IMAGE_BASE_MODELS:
                 return plan_type, base_model
     return None, None
 
@@ -131,7 +136,7 @@ def is_supported_image_model(model: object) -> bool:
 
 def is_codex_image_model(model: object) -> bool:
     _, base_model = split_image_model(model)
-    return base_model == CODEX_IMAGE_MODEL
+    return base_model in CODEX_IMAGE_BASE_MODELS
 
 
 def is_image_chat_request(body: dict[str, object]) -> bool:

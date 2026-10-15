@@ -4,7 +4,7 @@ from typing import Any
 
 from services.account_service import account_service
 from services.model_service import model_catalog_service
-from utils.helper import CODEX_IMAGE_MODEL, IMAGE_MODEL_ALIASES, WEB_IMAGE_MODELS
+from utils.helper import CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25, IMAGE_MODEL_ALIASES, WEB_IMAGE_MODELS
 
 
 def list_models() -> dict[str, Any]:
@@ -30,14 +30,15 @@ def list_models() -> dict[str, Any]:
 
     if web_image_accounts:
         dynamic_models.update(WEB_IMAGE_MODELS | set(IMAGE_MODEL_ALIASES))
-    if codex_types & {"Plus", "Team", "Pro"}:
-        dynamic_models.add(CODEX_IMAGE_MODEL)
-    if "Plus" in codex_types:
-        dynamic_models.add(f"plus-{CODEX_IMAGE_MODEL}")
-    if "Team" in codex_types:
-        dynamic_models.add(f"team-{CODEX_IMAGE_MODEL}")
-    if "Pro" in codex_types:
-        dynamic_models.add(f"pro-{CODEX_IMAGE_MODEL}")
+    for codex_model in (CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25):
+        if codex_types & {"Plus", "Team", "Pro"}:
+            dynamic_models.add(codex_model)
+        if "Plus" in codex_types:
+            dynamic_models.add(f"plus-{codex_model}")
+        if "Team" in codex_types:
+            dynamic_models.add(f"team-{codex_model}")
+        if "Pro" in codex_types:
+            dynamic_models.add(f"pro-{codex_model}")
 
     for model in sorted(dynamic_models):
         if model not in seen:
