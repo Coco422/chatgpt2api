@@ -40,18 +40,26 @@ class ImageModel25SettingTests(unittest.TestCase):
                 ("gpt-5.6-luna", "extended"),
             )
 
-    def test_image_model_settings_for_gpt_image_2_5_falls_back_to_default(self) -> None:
+    def test_image_model_settings_for_gpt_image_2_5_falls_back_to_auto(self) -> None:
+        """合并说明：#406 原本让 2.5 在未配置专用上游名时回落到
+        `default_upstream_model_name`（gpt-5-5）。合并 #418 后改为回落 `auto`
+        —— 2026-10 网页端抓包口径要求网页生图统一上送 model=auto。
+
+        配置了 `default_upstream_model_name_25` 时仍会透传，见上一个测试。
+        """
         with mock.patch.object(openai_backend_api, "config", FakeImageConfig(default_25="")):
             backend = OpenAIBackendAPI()
             self.assertEqual(
                 backend._image_model_settings("gpt-image-2.5"),
-                ("gpt-5-5", ""),
+                ("auto", ""),
             )
 
     def test_image_model_settings_keeps_existing_mappings(self) -> None:
         with mock.patch.object(openai_backend_api, "config", FakeImageConfig()):
             backend = OpenAIBackendAPI()
-            self.assertEqual(backend._image_model_settings("gpt-image-2"), ("gpt-5-5", ""))
+            # 合并说明：#406 原本期望 gpt-image-2 → default_upstream_model_name；
+            # 合并 #418 后网页链路统一走 auto（Codex 链路不受影响）
+            self.assertEqual(backend._image_model_settings("gpt-image-2"), ("auto", ""))
             self.assertEqual(
                 backend._image_model_settings("codex-gpt-image-2"),
                 ("codex-gpt-image-2", ""),

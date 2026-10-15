@@ -70,7 +70,11 @@ class AccountCapabilityTests(unittest.TestCase):
 
     def test_split_image_model_supports_plan_type_prefix(self) -> None:
         self.assertEqual(split_image_model("gpt-image-2"), (None, "gpt-image-2"))
-        self.assertEqual(split_image_model("gpt-image-2.5"), (None, "gpt-image-2.5"))
+        # 合并说明：#406 原本期望 (None, "gpt-image-2.5")，但 #420 把
+        # gpt-image-2.5 定义为真实上游 slug gpt-image-2.5-flare 的兼容别名，
+        # 会在这里被解析掉。合并时采用 #420 的口径（对上真实模型名）。
+        self.assertEqual(split_image_model("gpt-image-2.5"), (None, "gpt-image-2.5-flare"))
+        self.assertEqual(split_image_model("gpt-image-2.5-flare"), (None, "gpt-image-2.5-flare"))
         self.assertEqual(split_image_model("plus-codex-gpt-image-2"), ("plus", "codex-gpt-image-2"))
         self.assertEqual(split_image_model("team-codex-gpt-image-2"), ("team", "codex-gpt-image-2"))
         self.assertEqual(split_image_model("pro-codex-gpt-image-2"), ("pro", "codex-gpt-image-2"))

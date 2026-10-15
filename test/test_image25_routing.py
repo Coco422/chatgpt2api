@@ -31,10 +31,21 @@ class Image25RoutingTests(unittest.TestCase):
         for name in ("gpt-image-2.5", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"):
             self.assertTrue(is_image_chat_request({"model": name}))
 
-    def test_existing_configured_image2_mapping_is_preserved(self):
+    def test_default_web_image_model_uses_auto(self):
+        """合并说明：本测试原属 #420，断言 gpt-image-2 沿用
+        default_upstream_model_name（("gpt-5-5", "extended")）。
+
+        但 #418 基于 2026-10 网页端抓包，明确要求默认网页生图用
+        `model=auto` 由服务端挑模型，且 prepare 与 f/conversation 必须共用
+        这一取值。两者直接冲突，合并时以 #418 为准（它才是修复空 404 的完整
+        改动，#420 不含 sentinel 相关修改、单独无法恢复生图）。
+
+        显式的 Image 2.5 slug 仍然会原样透传，见
+        test_prepare_generate_and_edit_preserve_the_same_model。
+        """
         with mock.patch.object(openai_backend_api, "config", mock.Mock(
                 default_upstream_model_name="gpt-5-5-extended", default_thinking_effort="auto")):
-            self.assertEqual(self.api._image_model_settings("gpt-image-2"), ("gpt-5-5", "extended"))
+            self.assertEqual(self.api._image_model_settings("gpt-image-2"), ("auto", ""))
 
     def test_codex_prefixes_keep_their_existing_route(self):
         for prefix in ("plus", "team", "pro"):
@@ -43,24 +54,34 @@ class Image25RoutingTests(unittest.TestCase):
             self.assertEqual(self.api._image_model_settings(name)[0], "codex-gpt-image-2")
 
     def test_prepare_generate_and_edit_preserve_the_same_model(self):
+        """合并说明：默认（未配置 default_upstream_model_name_25）时，网页生图
+        一律走 `model=auto`（#418 的 2026-10 抓包口径）；只有显式配置了该名字，
+        2.5 slug 才会按配置上送。这里测的是后者（配置逃生口）。
+
+        默认走 auto 的行为由 test_sentinel_handshake.ImageModelSlugTests
+        .test_web_image_models_map_to_auto 覆盖。
+        """
         requirements = ChatRequirements(token="requirements", turnstile_token="turnstile")
         response = mock.Mock(status_code=200)
         response.json.return_value = {"conduit_token": "conduit"}
         reference = {"file_id": "file-1", "width": 10, "height": 10,
                      "file_size": 20, "mime_type": "image/png", "file_name": "input.png"}
-        for requested, expected in (
+        for requested, configured in (
             ("gpt-image-2.5", "gpt-image-2.5-flare"),
             ("gpt-image-2.5-flare", "gpt-image-2.5-flare"),
             ("gpt-image-2.5-sunburst", "gpt-image-2.5-sunburst"),
         ):
             for references in (None, [reference]):
                 with self.subTest(requested=requested, edit=bool(references)):
-                    with mock.patch.object(self.api.session, "post", return_value=response) as post:
+                    with mock.patch.object(openai_backend_api, "config", mock.Mock(
+                            default_upstream_model_name_25=configured,
+                            default_thinking_effort="auto")), \
+                            mock.patch.object(self.api.session, "post", return_value=response) as post:
                         self.api._prepare_image_conversation("apple", requirements, requested)
                         self.api._start_image_generation("apple", requirements, "conduit", requested, references)
                     first, second = post.call_args_list
-                    self.assertEqual(first.kwargs["json"]["model"], expected)
-                    self.assertEqual(second.kwargs["json"]["model"], expected)
+                    self.assertEqual(first.kwargs["json"]["model"], configured)
+                    self.assertEqual(second.kwargs["json"]["model"], configured)
 
     def test_catalog_advertises_image25_when_accounts_exist(self):
         with mock.patch.object(openai_v1_models.model_catalog_service, "list_models",

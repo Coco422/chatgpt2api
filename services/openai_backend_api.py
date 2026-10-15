@@ -648,24 +648,29 @@ class OpenAIBackendAPI:
         return payload
 
     def _image_model_settings(self, model: str) -> tuple[str, str]:
-        """网页生图的模型名映射（合并 PR #418 与 #420 的口径）。
+        """网页生图的模型名映射（合并 PR #418 / #420 / #406 的口径）。
 
-        - #418 对齐 2026-10 网页端抓包：默认流程用 `model=auto`，由服务端挑选
-          当前可用模型，且 prepare 与 f/conversation 必须共用这一取值。
-        - #420 的要求：请求里显式给出的 Image 2.5 slug 必须原样透传，不能被
-          降级成 `auto`，否则用户选了 2.5 也拿不到 2.5。
-        - Codex 链路继续使用 image_generation 工具模型名。
+        这里有一处**不可调和的冲突**，取舍如下：
 
-        两个口径并不矛盾：默认/通用模型走 auto，只有显式 2.5 slug 才透传。
+        - #418 对齐 2026-10 网页端抓包，要求网页生图统一上送 `model=auto`
+          由服务端挑模型；它的测试明确把 `gpt-image-2.5` 也算进"一律 auto"。
+        - #420 / #406 希望显式 Image 2.5 slug 能指定上游模型名。
+
+        默认以 #418 为准——它是修复「伪装成 404 的 Model not found」的完整改动，
+        而 #420 不含任何 sentinel 相关修改、单独无法恢复生图。
+        #420/#406 的能力保留为**显式配置逃生口**：在设置里填
+        `default_upstream_model_name_25`（如 `gpt-image-2.5-flare`）后，
+        2.5 slug 就会按该名字上送。
         """
         _, base_model = split_image_model(model)
         # Codex 链路（2 系列 + 2.5 系列）直接用 image_generation 工具模型名
         if base_model in {CODEX_IMAGE_MODEL, CODEX_IMAGE_MODEL_25}:
             return base_model, ""
-        # 显式 Image 2.5 slug：透传真实上游模型名（#420）；
-        # 允许用 default_upstream_model_name_25 覆盖（#406）
+        # 显式 Image 2.5 slug：默认仍走 auto；只有配置了名字才透传
         if base_model in WEB_IMAGE_MODELS - {"gpt-image-2"}:
-            upstream_model = config.default_upstream_model_name_25 or base_model
+            upstream_model = config.default_upstream_model_name_25 or "auto"
+            if upstream_model == "auto":
+                return "auto", ""
             model_name, separator, suffix = upstream_model.rpartition("-")
             if separator and suffix.lower() in {"standard", "extended", "max"}:
                 return model_name, suffix.lower()
