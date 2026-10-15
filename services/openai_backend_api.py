@@ -24,7 +24,14 @@ from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from services.sentinel_solver_client import solve_turnstile, solver_user_agent
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from utils.helper import (
+    UpstreamHTTPError,
+    WEB_IMAGE_MODELS,
+    ensure_ok,
+    iter_sse_payloads,
+    new_uuid,
+    split_image_model,
+)
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 
@@ -619,9 +626,22 @@ class OpenAIBackendAPI:
         return payload
 
     def _image_model_settings(self, model: str) -> tuple[str, str]:
-        """网页生图使用 auto，由服务端选择当前可用模型。"""
+        """网页生图的模型名映射（合并 PR #418 与 #420 的口径）。
+
+        - #418 对齐 2026-10 网页端抓包：默认流程用 `model=auto`，由服务端挑选
+          当前可用模型，且 prepare 与 f/conversation 必须共用这一取值。
+        - #420 的要求：请求里显式给出的 Image 2.5 slug 必须原样透传，不能被
+          降级成 `auto`，否则用户选了 2.5 也拿不到 2.5。
+        - Codex 链路继续使用 image_generation 工具模型名。
+
+        两个口径并不矛盾：默认/通用模型走 auto，只有显式 2.5 slug 才透传。
+        """
         _, base_model = split_image_model(model)
-        return (CODEX_IMAGE_MODEL if base_model == CODEX_IMAGE_MODEL else "auto"), ""
+        if base_model == CODEX_IMAGE_MODEL:
+            return base_model, ""
+        if base_model in WEB_IMAGE_MODELS - {"gpt-image-2"}:
+            return base_model, self._normalize_thinking_effort(config.default_thinking_effort)
+        return "auto", ""
 
     def _image_headers(self, path: str, requirements: ChatRequirements, conduit_token: str = "", accept: str = "*/*") -> \
             Dict[str, str]:
