@@ -155,6 +155,23 @@ class SolverPage:
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
             )
+        else:
+            # SENTINEL_SOLVER_USER_AGENT 是 2026-10 排查中踩过的最大的坑：
+            # Turnstile 绑定的是**算它的真实浏览器**，把 UA 伪装成主服务的
+            # FINGERPRINT_UA（chrome146）而本机是 Chromium 153 时，主服务会稳定拿到
+            # 伪装成 404 的 {"detail":"Model not found"}，看起来像账号被限制，极难排查。
+            browser_major = self._browser.version.split(".")[0]
+            override_major = self.user_agent.rsplit("Chrome/", 1)[-1].split(".", 1)[0]
+            if override_major != browser_major:
+                print(
+                    "[sentinel-solver] WARNING: SENTINEL_SOLVER_USER_AGENT 的 Chrome 主版本 "
+                    f"({override_major}) 与真实浏览器 ({browser_major}) 不一致。\n"
+                    "[sentinel-solver]           Turnstile 绑定真实浏览器，UA 伪装会让主服务生图"
+                    "稳定失败（f/conversation 返回伪装 404 Model not found）。\n"
+                    "[sentinel-solver]           除非明确知道后果，请取消设置该变量，"
+                    "让求解服务使用自己的真实 UA。",
+                    flush=True,
+                )
         try:
             await self.page()
         except Exception as exc:  # noqa: BLE001
