@@ -2780,11 +2780,19 @@ class OpenAIBackendAPI:
                 pass
 
     def _bootstrap(self) -> None:
-        """预热首页，并提取 PoW 相关脚本引用。"""
-        response = self.session.get(
-            self.base_url + "/",
-            headers=self._bootstrap_headers(),
-            timeout=30,
+        """预热首页，并提取 PoW 相关脚本引用。
+
+        注意：这里和 `_get_conversation_init` 一样必须走 `_retry_cloudflare_challenge`。
+        首页是 Cloudflare 最容易被挑战的入口，裸调用一旦被挑战，`ensure_ok` 会
+        立刻抛 `bootstrap failed: status=403`，导致连账号信息都刷不出来、
+        整条生图链路全线失败（排查时表现为"忽然全坏"，很容易被误判成配置问题）。
+        """
+        response = self._retry_cloudflare_challenge(
+            lambda: self.session.get(
+                self.base_url + "/",
+                headers=self._bootstrap_headers(),
+                timeout=30,
+            )
         )
         ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
