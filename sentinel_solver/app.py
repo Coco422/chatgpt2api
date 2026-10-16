@@ -135,6 +135,7 @@ class SolverPage:
         self._lock = asyncio.Lock()
         self._turnstile_asset = ""
         self.user_agent = USER_AGENT
+        self.cookies: dict[str, str] = {}
         self.last_error = ""
 
     async def start(self) -> None:
@@ -236,7 +237,29 @@ class SolverPage:
         self._page = page
         self._opened_at = time.monotonic()
         self.last_error = ""
+        await self._capture_cookies()
         print(f"[sentinel-solver] chatgpt.com page ready: {await page.title()!r}", flush=True)
+
+    async def _capture_cookies(self) -> None:
+        """记录当前 chatgpt.com 的 cookie，供主服务同步（见 status() 的说明）。"""
+        self.cookies = {}
+        if self._context is None:
+            return
+        try:
+            jar = await self._context.cookies("https://chatgpt.com")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[sentinel-solver] cookie capture failed: {exc}", flush=True)
+            return
+        self.cookies = {
+            str(item.get("name")): str(item.get("value"))
+            for item in jar
+            if item.get("name") and item.get("value")
+        }
+        if self.cookies:
+            print(
+                "[sentinel-solver] captured cookies: " + ", ".join(sorted(self.cookies)),
+                flush=True,
+            )
 
     @staticmethod
     async def _is_ready(page: Page | None) -> bool:
@@ -333,6 +356,11 @@ class SolverPage:
             "user_agent": self.user_agent,
             "timezone": TIMEZONE or None,
             "last_error": self.last_error or None,
+            # 页面持有的 chatgpt.com cookie，主要是 Cloudflare 的 __cf_bm / _cfuvid
+            # 和 oai-did。主服务把这份 cookie 同步到自己的 session 后，才能通过
+            # Cloudflare 对 sentinel 等端点的**路径级**机器人校验（实测不带是
+            # 持续 403 挑战，带上立刻放行）。见 HANDOVER 5.1 关键发现 3。
+            "cookies": dict(self.cookies),
         }
 
 

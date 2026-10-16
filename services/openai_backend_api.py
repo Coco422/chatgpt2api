@@ -23,7 +23,7 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from services.sentinel_solver_client import solve_turnstile, solver_user_agent
+from services.sentinel_solver_client import solve_turnstile, solver_cookies, solver_user_agent
 from utils.helper import (
     UpstreamHTTPError,
     WEB_IMAGE_MODELS,
@@ -262,6 +262,42 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+        self._install_cloudflare_retry()
+
+    def _install_cloudflare_retry(self) -> None:
+        """把 Cloudflare 挑战重试收敛到传输层，让**所有**上游调用自动受益。
+
+        背景：2026-10 之后 chatgpt.com 对多个端点（首页 `/`、`/backend-api/sentinel/
+        chat-requirements/{prepare,finalize}`、`/backend-api/conversation/init` 等）
+        会**间歇性**返回 Cloudflare 挑战（403 + `cf-mitigated: challenge` + HTML）。
+        实测同一端点连打三次是 `403 → 200 → 200`，也就是"重试一次就好"。
+
+        #418 只给其中 4 处调用包了 `_retry_cloudflare_challenge`，其余 30 处裸调用
+        一旦撞上挑战就立刻抛错。排查中先后在 `_bootstrap`、`chat_requirements_prepare`
+        上踩到同一个坑，说明逐个补调用点必然还会漏。
+
+        这里改为在 session 上包一层，覆盖 `get/post/put/patch/delete` 全部动词；
+        `_is_cloudflare_challenge` 只对"403 + cf-mitigated=challenge 或 text/html"
+        判定为挑战，JSON 的错误响应会被原样返回，因此不会改变既有错误语义。
+        """
+        session = getattr(self, "session", None)
+        if session is None or getattr(self, "_cloudflare_retry_installed", False):
+            return
+        for verb in ("get", "post", "put", "patch", "delete"):
+            original = getattr(session, verb, None)
+            if original is None:
+                continue
+            setattr(session, verb, self._make_retrying_verb(original))
+        self._cloudflare_retry_installed = True
+
+    def _make_retrying_verb(self, original: Callable[..., Any]) -> Callable[..., Any]:
+        """构造一个"失败即重试 Cloudflare 挑战"的动词包装。"""
+        retry = self._retry_cloudflare_challenge
+
+        def retrying_verb(*args: Any, **kwargs: Any) -> Any:
+            return retry(lambda: original(*args, **kwargs))
+
+        return retrying_verb
 
     def close(self) -> None:
         if getattr(self, "_closed", False):
@@ -2782,28 +2818,49 @@ class OpenAIBackendAPI:
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。
 
-        注意：这里和 `_get_conversation_init` 一样必须走 `_retry_cloudflare_challenge`。
-        首页是 Cloudflare 最容易被挑战的入口，裸调用一旦被挑战，`ensure_ok` 会
-        立刻抛 `bootstrap failed: status=403`，导致连账号信息都刷不出来、
-        整条生图链路全线失败（排查时表现为"忽然全坏"，很容易被误判成配置问题）。
+        Cloudflare 挑战重试由 session 层统一处理（见 `_install_cloudflare_retry`），
+        这里不需要再手工包一层。
         """
-        response = self._retry_cloudflare_challenge(
-            lambda: self.session.get(
-                self.base_url + "/",
-                headers=self._bootstrap_headers(),
-                timeout=30,
-            )
+        response = self.session.get(
+            self.base_url + "/",
+            headers=self._bootstrap_headers(),
+            timeout=30,
         )
         ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
 
+    def _apply_solver_cookies(self) -> None:
+        """把求解服务浏览器的 chatgpt.com cookie 同步到本 session。
+
+        2026-10 之后 Cloudflare 对 `sentinel/chat-requirements/*` 等端点加了**路径级**
+        机器人校验：同样用 curl_cffi 指纹，**不带**浏览器 cookie 时是**持续** 403 挑战
+        （不是偶发，重试无效），带上 `__cf_bm` / `_cfuvid` 立刻放行。
+
+        实测（同一 token、同一出口）：
+            裸 curl_cffi      → 403 cf-mitigated=challenge
+            带浏览器 cookie   → 500（仅因测试用假 p token；Cloudflare 已放行）
+        """
+        cookies = solver_cookies()
+        if not cookies:
+            return
+        applied = []
+        for name, value in cookies.items():
+            try:
+                self.session.cookies.set(name, value, domain=".chatgpt.com")
+                applied.append(name)
+            except Exception:  # noqa: BLE001
+                continue
+        if applied:
+            logger.debug({"event": "sentinel_solver_cookies_applied", "cookies": sorted(applied)})
+
     def _get_chat_requirements(self) -> ChatRequirements:
         """完成 prepare/finalize 握手；质量不足时对话会伪装返回 Model not found 404。"""
         base = "/backend-api/sentinel/chat-requirements" if self.access_token else (
             "/backend-anon/sentinel/chat-requirements"
         )
+        self._apply_solver_cookies()
         sentinel_user_agent = self._sentinel_user_agent()
         p_token = build_legacy_requirements_token(
             sentinel_user_agent, self.pow_script_sources, self.pow_data_build

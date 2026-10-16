@@ -29,7 +29,12 @@ USER_AGENT_CACHE_SECONDS = 600
 USER_AGENT_FAILURE_CACHE_SECONDS = 30
 
 _user_agent_lock = threading.Lock()
-_user_agent_cache: dict[str, object] = {"url": "", "value": "", "expires_at": 0.0}
+_user_agent_cache: dict[str, object] = {
+    "url": "",
+    "value": "",
+    "cookies": {},
+    "expires_at": 0.0,
+}
 
 
 class SentinelSolverError(RuntimeError):
@@ -43,21 +48,26 @@ def _solver_headers() -> dict[str, str]:
     return headers
 
 
-def solver_user_agent() -> str:
-    """User agent of the page that computes the Turnstile token, or "" when unset.
+def solver_identity() -> tuple[str, dict[str, str]]:
+    """求解服务页面的 (user_agent, cookies)，未配置或失败时返回 ("", {})。
 
-    The requirements/proof tokens embed the UA, and it has to match the browser
-    environment that solved the challenge; otherwise the conversation endpoint
-    answers `404 {"detail": "Model not found"}`.
+    两者都来自同一个 `/health`，缓存共用一份，避免每次生图多打一次请求。
+
+    - UA：requirements/proof token 里编码的 UA 必须与解出 Turnstile 的浏览器一致，
+      否则对话接口会回 `404 {"detail": "Model not found"}`。
+    - cookies：主要是 Cloudflare 的 `__cf_bm` / `_cfuvid`。2026-10 之后 Cloudflare
+      对 sentinel 等端点有**路径级**机器人校验，主服务只带 curl_cffi 指纹会被持续
+      403 挑战；把浏览器这份 cookie 同步过来即可放行（实测 403 → 500）。
     """
     base_url = config.sentinel_solver_url
     if not base_url:
-        return ""
+        return "", {}
     with _user_agent_lock:
         now = time.monotonic()
         if _user_agent_cache["url"] == base_url and now < float(_user_agent_cache["expires_at"]):
-            return str(_user_agent_cache["value"])
+            return str(_user_agent_cache["value"]), dict(_user_agent_cache["cookies"] or {})
         value = ""
+        cookies: dict[str, str] = {}
         try:
             response = requests.get(
                 f"{base_url}/health",
@@ -65,12 +75,30 @@ def solver_user_agent() -> str:
                 timeout=SOLVER_TIMEOUT_SECONDS,
             )
             if response.status_code == 200:
-                value = str((response.json() or {}).get("user_agent") or "")
+                payload = response.json() or {}
+                value = str(payload.get("user_agent") or "")
+                raw_cookies = payload.get("cookies")
+                if isinstance(raw_cookies, dict):
+                    cookies = {
+                        str(name): str(item)
+                        for name, item in raw_cookies.items()
+                        if name and item
+                    }
         except Exception as exc:  # noqa: BLE001
             logger.warning({"event": "sentinel_solver_health_error", "error": str(exc)})
         ttl = USER_AGENT_CACHE_SECONDS if value else USER_AGENT_FAILURE_CACHE_SECONDS
-        _user_agent_cache.update(url=base_url, value=value, expires_at=now + ttl)
-        return value
+        _user_agent_cache.update(url=base_url, value=value, cookies=cookies, expires_at=now + ttl)
+        return value, cookies
+
+
+def solver_user_agent() -> str:
+    """User agent of the page that computes the Turnstile token, or "" when unset."""
+    return solver_identity()[0]
+
+
+def solver_cookies() -> dict[str, str]:
+    """求解服务浏览器持有的 chatgpt.com cookie（用于通过 Cloudflare 路径级校验）。"""
+    return solver_identity()[1]
 
 
 def solve_turnstile(dx: str, p: str, requirements: dict | None = None) -> str:
